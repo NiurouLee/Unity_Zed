@@ -1,5 +1,5 @@
 {
-    "name": "com.maligan.zed-unity",
+    "name": "com.maligan.unity-zed",
     "rootNamespace": "UnityZed",
     "references": [
         "GUID:b93f844d45cfcc44fa2b0eed5c9ec6bb"

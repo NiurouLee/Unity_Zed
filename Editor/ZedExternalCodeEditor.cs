@@ -16,9 +16,21 @@ namespace UnityZed
 
         private static IGenerator CreateSdkStyleGeneration()
         {
-            var assembly = typeof(IGenerator).Assembly;
-            var type = assembly.GetType("Microsoft.Unity.VisualStudio.Editor.SdkStyleProjectGeneration");
-            return (IGenerator)Activator.CreateInstance(type);
+            try
+            {
+                var assembly = typeof(IGenerator).Assembly;
+                var type = assembly.GetType("Microsoft.Unity.VisualStudio.Editor.SdkStyleProjectGeneration");
+                if (type == null)
+                    throw new InvalidOperationException("Type SdkStyleProjectGeneration not found. " +
+                        "Ensure com.unity.ide.visualstudio is installed and up to date.");
+                return (IGenerator)Activator.CreateInstance(type);
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[ZedEditor] Failed to create project generator: {e.Message}\n" +
+                    "Check that com.unity.ide.visualstudio is present in your project.");
+                throw;
+            }
         }
 
         private static readonly ILogger sLogger = ZedLogger.Create();
@@ -56,13 +68,12 @@ namespace UnityZed
             Assert.IsNotNull(m_Process);
             Assert.IsNotNull(m_Generator);
 
-            if (!string.IsNullOrEmpty(filePath) && !m_Generator.IsSupportedFile(filePath))
-            {
-                sLogger.Log($"File '{filePath}' is not supported by the generator.");
-                return false;
-            }
+            // Only sync the project generator for file types it understands (.cs, .asmdef, etc.).
+            // For other assets (.shader, .uxml, .json, …) we still open them in Zed — just skip
+            // the potentially expensive generator sync, matching VS Code package behavior.
+            if (!string.IsNullOrEmpty(filePath) && m_Generator.IsSupportedFile(filePath))
+                m_Generator.Sync();
 
-            m_Generator.Sync();
             m_Settings.Sync();
 
             return m_Process.OpenProject(filePath, line, column);
@@ -79,8 +90,10 @@ namespace UnityZed
         public void SyncIfNeeded(string[] addedFiles, string[] deletedFiles, string[] movedFiles, string[] movedFromFiles, string[] importedFiles)
         {
             Assert.IsNotNull(m_Generator);
+            Assert.IsNotNull(m_Settings);
 
             m_Generator.SyncIfNeeded(addedFiles.Union(deletedFiles).Union(movedFiles).Union(movedFromFiles), importedFiles);
+            m_Settings.Sync();
         }
 
         //
