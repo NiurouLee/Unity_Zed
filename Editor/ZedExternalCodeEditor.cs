@@ -140,34 +140,48 @@ namespace UnityZed
             if (line   == -1) line   = 1;
             if (column == -1) column = 0;
 
-            var app  = DefaultApp;
-            var args = BuildArguments(filePath, line, column);
+            var app   = DefaultApp;
+            var isCli = IsBinCli(app);
+            var args  = BuildArguments(filePath, line, column, isCli);
 
             Debug.Log($"[ZedEditor] \"{app}\"  {args}");
 
             return IsOSX
-                ? Launch("open", $"-n \"{app}\" --args {args}")
-                : Launch(app, args);
+                ? Launch("open", $"-n \"{app}\" --args {args}", false)
+                : Launch(app, args, isCli);
         }
 
-        static string BuildArguments(string filePath, int line, int column)
-        {
-            // Always pass the project root so Zed opens it as a workspace.
-            var args = $@"""{ProjectDir}""";
+        // bin\zed.exe is the console CLI shim; Zed.exe (one level up) is the GUI app.
+        static bool IsBinCli(string app) =>
+            Path.GetFileName(Path.GetDirectoryName(app) ?? "")
+                .Equals("bin", StringComparison.OrdinalIgnoreCase);
 
-            if (filePath != "" && filePath != ProjectDir)
+        static string BuildArguments(string filePath, int line, int column, bool isCli)
+        {
+            if (isCli)
             {
-                // Zed CLI: zed <project> <file[:line[:col]]>
-                // Mirrors the VS Code pattern: "project" -g "file":line:col
-                // but Zed uses no flag — file is a plain positional argument.
-                args += $@" ""{filePath}"":{line}:{column}";
+                // Windows bin\zed.exe has two known bugs that make passing a project dir
+                // or file:line:col unreliable:
+                //   1. Project dir gets concatenated with the IPC pipe path (zed-cli:\UUID),
+                //      causing "Error: opening project path …\zed-cli:\UUID".
+                //   2. The file:line:col suffix triggers a \\?\ extended-path prefix bug
+                //      (zed-industries/zed issue #46943, open as of 2026-01).
+                // Workaround: pass only the file path (or project dir when no file given).
+                return filePath != "" ? $@"""{filePath}""" : $@"""{ProjectDir}""";
             }
 
+            // Zed.exe (GUI) or macOS CLI: pass project root + file with line:col.
+            var args = $@"""{ProjectDir}""";
+            if (filePath != "" && filePath != ProjectDir)
+                args += $@" ""{filePath}"":{line}:{column}";
             return args;
         }
 
-        static bool Launch(string app, string args)
+        static bool Launch(string app, string args, bool isCli)
         {
+            // CLI shim: UseShellExecute = false + CreateNoWindow so it runs silently
+            // in the background and forwards the request to the Zed GUI server.
+            // GUI app: UseShellExecute = true — standard Windows approach, no CMD window.
             try
             {
                 new Process
@@ -176,9 +190,9 @@ namespace UnityZed
                     {
                         FileName        = app,
                         Arguments       = args,
-                        WindowStyle     = ProcessWindowStyle.Normal,
-                        CreateNoWindow  = true,
-                        UseShellExecute = true,
+                        UseShellExecute = !isCli,
+                        CreateNoWindow  = isCli,
+                        WindowStyle     = isCli ? ProcessWindowStyle.Hidden : ProcessWindowStyle.Normal,
                     }
                 }.Start();
                 return true;
