@@ -31,6 +31,7 @@ namespace UnityZed
             new[]
             {
                 "/Applications/Zed.app/Contents/MacOS/cli",
+                "/opt/homebrew/bin/zed", // Apple Silicon Homebrew
                 "/usr/local/bin/zed",
             };
 #elif UNITY_EDITOR_LINUX

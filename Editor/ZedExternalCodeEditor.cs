@@ -1,7 +1,11 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Diagnostics;
+#if UNITY_EDITOR_OSX
+using System.Runtime.InteropServices;
+#endif
 using UnityEditor;
 using UnityEngine;
 using Unity.CodeEditor;
@@ -146,15 +150,27 @@ namespace UnityZed
 
             Debug.Log($"[ZedEditor] \"{app}\"  {args}");
 
-            return IsOSX
-                ? Launch("open", $"-n \"{app}\" --args {args}", false)
-                : Launch(app, args, isCli);
+            // macOS: do not use `open -n … --args …` with /usr/local/bin/zed — it often fails
+            // silently or mis-handles argv. Spawn the CLI directly like a terminal would.
+            // Also, IsBinCli must NOT match macOS paths like …/usr/local/bin/zed (parent dir
+            // name is "bin"), which incorrectly triggered the Windows-only zed.exe workaround.
+            if (IsOSX)
+                return LaunchMac(app, args);
+
+            return Launch(app, args, isCli);
         }
 
-        // bin\zed.exe is the console CLI shim; Zed.exe (one level up) is the GUI app.
-        static bool IsBinCli(string app) =>
-            Path.GetFileName(Path.GetDirectoryName(app) ?? "")
+        // Windows only: bin\zed.exe is the console CLI shim; Zed.exe (one level up) is the GUI app.
+        // On macOS/Linux, …/bin/zed is a normal install location, not the Windows shim layout.
+        static bool IsBinCli(string app)
+        {
+#if UNITY_EDITOR_WIN
+            return Path.GetFileName(Path.GetDirectoryName(app) ?? "")
                 .Equals("bin", StringComparison.OrdinalIgnoreCase);
+#else
+            return false;
+#endif
+        }
 
         static string BuildArguments(string filePath, int line, int column, bool isCli)
         {
@@ -184,17 +200,18 @@ namespace UnityZed
             // GUI app: UseShellExecute = true — standard Windows approach, no CMD window.
             try
             {
-                new Process
+                var psi = new ProcessStartInfo
                 {
-                    StartInfo = new ProcessStartInfo
-                    {
-                        FileName        = app,
-                        Arguments       = args,
-                        UseShellExecute = !isCli,
-                        CreateNoWindow  = isCli,
-                        WindowStyle     = isCli ? ProcessWindowStyle.Hidden : ProcessWindowStyle.Normal,
-                    }
-                }.Start();
+                    FileName        = app,
+                    Arguments       = args,
+                    UseShellExecute = !isCli,
+                    CreateNoWindow  = isCli,
+                    WindowStyle     = isCli ? ProcessWindowStyle.Hidden : ProcessWindowStyle.Normal,
+                };
+                if (isCli && !string.IsNullOrEmpty(ProjectDir))
+                    psi.WorkingDirectory = ProjectDir;
+
+                Process.Start(psi);
                 return true;
             }
             catch (Exception e)
@@ -203,6 +220,123 @@ namespace UnityZed
                 return false;
             }
         }
+
+#if UNITY_EDITOR_OSX
+        [DllImport("libc", CallingConvention = CallingConvention.Cdecl, EntryPoint = "readlink")]
+        static extern long readlink_posix(
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
+            byte[] buf,
+            UIntPtr buflen);
+
+        static string PosixReadLink(string path)
+        {
+            var buf = new byte[8192];
+            var n   = readlink_posix(path, buf, (UIntPtr)buf.Length);
+            if (n < 0)
+                return null;
+            return System.Text.Encoding.UTF8.GetString(buf, 0, (int)n);
+        }
+
+        static string ResolveSymlinkChain(string path)
+        {
+            if (string.IsNullOrEmpty(path))
+                return path;
+            var cur = path;
+            for (var depth = 0; depth < 64; depth++)
+            {
+                if (!File.Exists(cur))
+                    return cur;
+                var target = PosixReadLink(cur);
+                if (string.IsNullOrEmpty(target))
+                    return cur;
+                cur = Path.IsPathRooted(target)
+                    ? target
+                    : Path.GetFullPath(Path.Combine(Path.GetDirectoryName(cur) ?? "", target));
+            }
+            return cur;
+        }
+
+        // EditorPrefs may point at a stale path (e.g. /usr/local/bin/zed on Homebrew Apple Silicon).
+        // Unity/Mono may also fail to exec through a symlink ("Cannot find the specified file").
+        static IEnumerable<string> MacZedExecutableCandidates(string editorPrefPath)
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var p in new[]
+                     {
+                         editorPrefPath,
+                         ResolveSymlinkChain(editorPrefPath),
+                         "/opt/homebrew/bin/zed",
+                         "/usr/local/bin/zed",
+                         "/Applications/Zed.app/Contents/MacOS/cli",
+                     })
+            {
+                if (string.IsNullOrEmpty(p))
+                    continue;
+                var q = p.Trim();
+                if (seen.Add(q))
+                    yield return q;
+            }
+        }
+
+        static bool LaunchMac(string app, string args)
+        {
+            foreach (var exe in MacZedExecutableCandidates(app))
+            {
+                if (!File.Exists(exe))
+                    continue;
+
+                var tryPath = exe;
+                var resolved = ResolveSymlinkChain(exe);
+                if (File.Exists(resolved))
+                    tryPath = resolved;
+
+                try
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName        = tryPath,
+                        Arguments       = args,
+                        UseShellExecute = false,
+                        CreateNoWindow  = true,
+                        WindowStyle     = ProcessWindowStyle.Hidden,
+                        WorkingDirectory = ProjectDir,
+                    });
+                    return true;
+                }
+                catch (Exception e)
+                {
+                    Debug.LogWarning($"[ZedEditor] Direct launch failed ({tryPath}): {e.Message}");
+                }
+            }
+
+            // Last resort: let Launch Services start Zed.app (argv still reach the CLI entry).
+            try
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName         = "/usr/bin/open",
+                    Arguments        = $"-na Zed --args {args}",
+                    UseShellExecute  = false,
+                    CreateNoWindow   = true,
+                    WindowStyle      = ProcessWindowStyle.Hidden,
+                    WorkingDirectory = ProjectDir,
+                });
+                return true;
+            }
+            catch (Exception e)
+            {
+                Debug.LogError(
+                    "[ZedEditor] Failed to launch Zed on macOS. Tried zed binaries under EditorPrefs, " +
+                    "/opt/homebrew/bin, /usr/local/bin, Zed.app cli, then `open -na Zed`.\n" +
+                    $"Original app path: {app}\nArgs: {args}\n{e.Message}\n" +
+                    "Fix: External Tools → set Zed to /Applications/Zed.app/Contents/MacOS/cli " +
+                    "or run `which zed` in Terminal and browse to that path.");
+                return false;
+            }
+        }
+#else
+        static bool LaunchMac(string app, string args) => false;
+#endif
 
         // ── GUI ──────────────────────────────────────────────────────────────────
 
