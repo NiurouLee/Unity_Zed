@@ -2,7 +2,6 @@ using System;
 using System.Linq;
 using Unity.CodeEditor;
 using UnityEngine;
-using UnityEngine.Assertions;
 using UnityEditor;
 using Microsoft.Unity.VisualStudio.Editor;
 
@@ -43,10 +42,11 @@ namespace UnityZed
 
         public void Initialize(string editorInstallationPath)
         {
-            m_Process = new(editorInstallationPath);
+            sLogger.Log($"Initialize path={editorInstallationPath}");
+            m_Process = new ZedProcess(editorInstallationPath);
             m_Generator = CreateSdkStyleGeneration();
-            m_Preferences = new(m_Generator);
-            m_Settings = new();
+            m_Preferences = new ZedPreferences(m_Generator);
+            m_Settings = new ZedSettings();
         }
 
         //
@@ -65,8 +65,15 @@ namespace UnityZed
 
         public bool OpenProject(string filePath = "", int line = -1, int column = -1)
         {
-            Assert.IsNotNull(m_Process);
-            Assert.IsNotNull(m_Generator);
+            // m_Process / m_Generator are null when Initialize() has not been called yet.
+            // This can happen if TryGetInstallationForPath returned false for the stored path
+            // during the last domain reload. Log a clear message instead of throwing an assertion.
+            if (m_Process == null || m_Generator == null)
+            {
+                Debug.LogError("[ZedEditor] OpenProject called before Initialize. " +
+                    "Please re-select Zed in Preferences → External Tools to reinitialize.");
+                return false;
+            }
 
             // Only sync the project generator for file types it understands (.cs, .asmdef, etc.).
             // For other assets (.shader, .uxml, .json, …) we still open them in Zed — just skip
@@ -81,19 +88,18 @@ namespace UnityZed
 
         public void SyncAll()
         {
-            Assert.IsNotNull(m_Generator);
+            if (m_Generator == null) return;
 
             m_Generator.Sync();
-            m_Settings.Sync();
+            m_Settings?.Sync();
         }
 
         public void SyncIfNeeded(string[] addedFiles, string[] deletedFiles, string[] movedFiles, string[] movedFromFiles, string[] importedFiles)
         {
-            Assert.IsNotNull(m_Generator);
-            Assert.IsNotNull(m_Settings);
+            if (m_Generator == null) return;
 
             m_Generator.SyncIfNeeded(addedFiles.Union(deletedFiles).Union(movedFiles).Union(movedFromFiles), importedFiles);
-            m_Settings.Sync();
+            m_Settings?.Sync();
         }
 
         //
@@ -101,6 +107,6 @@ namespace UnityZed
         //
 
         public void OnGUI()
-            => m_Preferences.OnGUI();
+            => m_Preferences?.OnGUI();
     }
 }
