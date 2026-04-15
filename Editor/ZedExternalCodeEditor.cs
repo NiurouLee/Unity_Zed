@@ -3,7 +3,8 @@ using System.Linq;
 using Unity.CodeEditor;
 using UnityEngine;
 using UnityEditor;
-using Microsoft.Unity.VisualStudio.Editor;
+// Explicit aliases to avoid CS0433 when Unity.Cursor.Editor also defines IGenerator.
+using IGenerator = Microsoft.Unity.VisualStudio.Editor.IGenerator;
 
 namespace UnityZed
 {

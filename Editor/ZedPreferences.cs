@@ -1,6 +1,8 @@
 using UnityEngine;
 using UnityEditor;
-using Microsoft.Unity.VisualStudio.Editor;
+// Explicit aliases to avoid CS0433 when Unity.Cursor.Editor also defines IGenerator.
+using IGenerator = Microsoft.Unity.VisualStudio.Editor.IGenerator;
+using ProjectGenerationFlag = Microsoft.Unity.VisualStudio.Editor.ProjectGenerationFlag;
 
 namespace UnityZed
 {
