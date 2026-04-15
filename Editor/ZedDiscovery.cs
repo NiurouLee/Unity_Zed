@@ -1,149 +1,133 @@
-using Unity.CodeEditor;
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using System.Xml.XPath;
-using System.Text;
-using NiceIO;
+using Unity.CodeEditor;
 
 namespace UnityZed
 {
+    // Path-discovery for Zed installations.
+    // Modelled after VSCodeDiscovery in com.unity.ide.vscode: uses Environment variables,
+    // FileInfo.Exists, and a lazy-cached result list.
     public class ZedDiscovery
     {
+        List<CodeEditor.Installation> m_Installations;
+
         public CodeEditor.Installation[] GetInstallations()
         {
-            var results = new List<CodeEditor.Installation>();
-            var candidates = BuildCandidates();
-
-            foreach (var (path, tryGetVersion) in candidates)
+            if (m_Installations == null)
             {
-                if (!path.FileExists())
-                    continue;
-
-                var name = new StringBuilder("Zed");
-                var getVersion = tryGetVersion ?? TryGetVersionFallback;
-
-                if (getVersion(path, out var version))
-                    name.Append($" [{version}]");
-
-                results.Add(new CodeEditor.Installation
-                {
-                    Name = name.ToString(),
-                    Path = path.MakeAbsolute().ToString(),
-                });
+                m_Installations = new List<CodeEditor.Installation>();
+                FindInstallationPaths();
             }
-
-            return results.ToArray();
+            return m_Installations.ToArray();
         }
 
-        public bool TryGetInstallationForPath(string editorPath, out CodeEditor.Installation installation)
+        void FindInstallationPaths()
         {
-            installation = default;
-
-            if (string.IsNullOrEmpty(editorPath))
-                return false;
-
-            var path = new NPath(editorPath);
-            if (!path.FileExists())
-                return false;
-
-            if (!IsZedExecutable(path))
-                return false;
-
-            var name = new StringBuilder("Zed");
-            if (TryGetVersionFromPlist(path, out var version))
-                name.Append($" [{version}]");
-
-            installation = new CodeEditor.Installation
+            var candidates =
+#if UNITY_EDITOR_OSX
+            new[]
             {
-                Name = name.ToString(),
-                Path = path.MakeAbsolute().ToString(),
+                "/Applications/Zed.app/Contents/MacOS/cli",
+                "/usr/local/bin/zed",
             };
-            return true;
-        }
+#elif UNITY_EDITOR_LINUX
+            new[]
+            {
+                "/var/lib/flatpak/app/dev.zed.Zed/current/active/files/bin/zed",
+                "/usr/bin/zeditor",
+                "/usr/bin/zed",
+                "/run/current-system/sw/bin/zeditor",
+                $"/etc/profiles/per-user/{Environment.UserName}/bin/zed",
+                $"/etc/profiles/per-user/{Environment.UserName}/bin/zeditor",
+                $"{GetHome()}/.local/bin/zed",
+            };
+#else // UNITY_EDITOR_WIN
+            new[]
+            {
+                // User-level installer (same layout as VS Code)
+                GetLocalAppData() + "/Programs/Zed/Zed.exe",
+                // System-level installers
+                GetProgramFiles()    + "/Zed/Zed.exe",
+                GetProgramFilesX86() + "/Zed/Zed.exe",
+                // Scoop
+                GetHome() + "/scoop/shims/zed.exe",
+                GetHome() + "/scoop/apps/zed/current/Zed.exe",
+            };
+#endif
 
-        // Returns true if the path looks like a Zed executable.
-        // Covers: zed / zeditor (all platforms), Zed.exe (Windows), and the macOS .app bundle CLI.
-        private static bool IsZedExecutable(NPath path)
-        {
-            var fileName = path.FileNameWithoutExtension.ToLowerInvariant();
+            var existing = candidates.Where(ZedExists).ToList();
+            if (!existing.Any())
+                return;
 
-            if (fileName == "zed" || fileName == "zeditor")
-                return true;
-
-            // macOS bundle: Zed.app/Contents/MacOS/cli
-            if (fileName == "cli" && path.ToString().IndexOf("Zed.app", StringComparison.OrdinalIgnoreCase) >= 0)
-                return true;
-
-            return false;
-        }
-
-        private static List<(NPath path, TryGetVersion tryGetVersion)> BuildCandidates()
-        {
-            var list = new List<(NPath, TryGetVersion)>();
+            foreach (var path in existing)
+            {
+                var name = "Zed";
 
 #if UNITY_EDITOR_OSX
-            // [macOS]
-            list.Add((new NPath("/Applications/Zed.app/Contents/MacOS/cli"), TryGetVersionFromPlist));
-            list.Add((new NPath("/usr/local/bin/zed"), null));
-#elif UNITY_EDITOR_LINUX
-            // [Linux] Flatpak
-            list.Add((new NPath("/var/lib/flatpak/app/dev.zed.Zed/current/active/files/bin/zed"), null));
-            // [Linux] Package repos
-            list.Add((new NPath("/usr/bin/zeditor"), null));
-            list.Add((new NPath("/usr/bin/zed"), null));
-            // [Linux] NixOS system profile
-            list.Add((new NPath("/run/current-system/sw/bin/zeditor"), null));
-            // [Linux] NixOS HomeManager (use current user, not hardcoded name)
-            var nixUser = Environment.UserName;
-            list.Add((new NPath($"/etc/profiles/per-user/{nixUser}/bin/zed"), null));
-            list.Add((new NPath($"/etc/profiles/per-user/{nixUser}/bin/zeditor"), null));
-            // [Linux] Official website tarball / manual install
-            list.Add((NPath.HomeDirectory.Combine(".local/bin/zed"), null));
-#elif UNITY_EDITOR_WIN
-            // [Windows] common installation paths
-            var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-            var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
-            var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
-            // Official installer (user-level, same layout as VS Code)
-            list.Add((new NPath(localAppData).Combine("Programs").Combine("Zed").Combine("Zed.exe"), null));
-            // System-level install
-            list.Add((new NPath(programFiles).Combine("Zed").Combine("Zed.exe"), null));
-            list.Add((new NPath(programFilesX86).Combine("Zed").Combine("Zed.exe"), null));
-            // Scoop
-            list.Add((NPath.HomeDirectory.Combine("scoop").Combine("shims").Combine("zed.exe"), null));
-            list.Add((NPath.HomeDirectory.Combine("scoop").Combine("apps").Combine("zed").Combine("current").Combine("Zed.exe"), null));
+                if (TryGetVersionFromPlist(path, out var v))
+                    name += $" [{v}]";
 #endif
-            return list;
+                m_Installations.Add(new CodeEditor.Installation { Name = name, Path = path });
+            }
         }
 
-        //
-        // TryGetVersion implementations
-        //
-        private delegate bool TryGetVersion(NPath path, out string version);
+        // ── Helpers ──────────────────────────────────────────────────────────────
 
-        private static bool TryGetVersionFallback(NPath path, out string version)
+        static bool ZedExists(string path)
         {
-            version = null;
-            return false;
+#if UNITY_EDITOR_OSX
+            // The CLI inside the .app bundle — check as a file.
+            return new FileInfo(path).Exists;
+#else
+            return new FileInfo(path).Exists;
+#endif
         }
 
-        private static bool TryGetVersionFromPlist(NPath path, out string version)
+        // Environment accessors — mirrors the VS Code plugin style.
+        // Replace backslashes with forward slashes so string concatenation works uniformly.
+        static string GetLocalAppData()  =>
+            Environment.GetEnvironmentVariable("LOCALAPPDATA")?.Replace('\\', '/') ?? "";
+
+        static string GetProgramFiles()  =>
+            Environment.GetEnvironmentVariable("ProgramFiles")?.Replace('\\', '/') ?? "";
+
+        static string GetProgramFilesX86() =>
+            (Environment.GetEnvironmentVariable("ProgramFiles(x86)") ??
+             Environment.GetEnvironmentVariable("ProgramFiles"))?.Replace('\\', '/') ?? "";
+
+        static string GetHome() =>
+            (Environment.GetEnvironmentVariable("USERPROFILE") ??   // Windows
+             Environment.GetEnvironmentVariable("HOME") ??          // macOS / Linux
+             "").Replace('\\', '/');
+
+        // ── macOS version from Info.plist ────────────────────────────────────────
+
+        static bool TryGetVersionFromPlist(string cliPath, out string version)
         {
             version = null;
-
-            var plistPath = path.Combine("../../Info.plist");
-            if (!plistPath.FileExists())
+            // cli lives at  Zed.app/Contents/MacOS/cli
+            // Info.plist at Zed.app/Contents/Info.plist  (two levels up from cli)
+            var plist = Path.GetFullPath(Path.Combine(cliPath, "..", "..", "Info.plist"));
+            if (!File.Exists(plist))
                 return false;
 
-            var xDoc = new XPathDocument(plistPath.ToString());
-            var node = xDoc.CreateNavigator().SelectSingleNode(
-                "/plist/dict/key[text()='CFBundleShortVersionString']/following-sibling::string[1]/text()");
-
-            if (node == null)
+            try
+            {
+                var doc  = new XPathDocument(plist);
+                var node = doc.CreateNavigator().SelectSingleNode(
+                    "/plist/dict/key[text()='CFBundleShortVersionString']" +
+                    "/following-sibling::string[1]/text()");
+                if (node == null) return false;
+                version = node.Value;
+                return true;
+            }
+            catch
+            {
                 return false;
-
-            version = node.Value;
-            return true;
+            }
         }
     }
 }
